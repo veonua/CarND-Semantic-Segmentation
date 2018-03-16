@@ -33,7 +33,16 @@ def load_vgg(sess, vgg_path):
     vgg_layer4_out_tensor_name = 'layer4_out:0'
     vgg_layer7_out_tensor_name = 'layer7_out:0'
     
-    return None, None, None, None, None
+    model = tf.saved_model.loader.load(sess, [vgg_tag], vgg_path)
+    graph = tf.get_default_graph()
+
+    input_image = graph.get_tensor_by_name(vgg_input_tensor_name)
+    keep_prob = graph.get_tensor_by_name(vgg_keep_prob_tensor_name)
+    vgg_layer3_out = graph.get_tensor_by_name(vgg_layer3_out_tensor_name)
+    vgg_layer4_out = graph.get_tensor_by_name(vgg_layer4_out_tensor_name)
+    vgg_layer7_out = graph.get_tensor_by_name(vgg_layer7_out_tensor_name)
+    return input_image, keep_prob, vgg_layer3_out, vgg_layer4_out, vgg_layer7_out
+
 tests.test_load_vgg(load_vgg, tf)
 
 
@@ -46,8 +55,49 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
     :param num_classes: Number of classes to classify
     :return: The Tensor for the last layer of output
     """
-    # TODO: Implement function
-    return None
+
+     # apply 1x1 convolution to the VGG 7 layer, set kernel size to 1 since it's 1x1 convolution
+    conv_1x1_7 = tf.layers.conv2d(vgg_layer7_out, num_classes, kernel_size=1, strides=(1,1), padding='same', 
+                                kernel_initializer=tf.truncated_normal_initializer(stddev=0.01), 
+                                kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+    
+    # first transpose layer, i.e. de-convolution
+    transposed_1 = tf.layers.conv2d_transpose(conv_1x1_7, num_classes, kernel_size=4, strides=(2, 2), padding='same', 
+                                        kernel_initializer=tf.truncated_normal_initializer(stddev=0.01),
+                                        kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+    
+    # 1st skip layer
+#     1) 1x1 conv based on vgg_layer4_out
+    vgg_layer4_out_scaled = tf.multiply(vgg_layer4_out, 0.01, name='vgg_layer4_out_caled')
+    conv_1x1_4 = tf.layers.conv2d(vgg_layer4_out_scaled, num_classes, kernel_size=1, strides=(1,1), padding='same', 
+                                   kernel_initializer=tf.truncated_normal_initializer(stddev=0.01),
+                                   kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+    # 2) add conv_1x1_4 and transposed_1 to form the first skip layer
+    transposed_1 = tf.add(transposed_1, conv_1x1_4)
+    
+    # second tranpose layer, i.e. de-convolution
+    transposed_2 = tf.layers.conv2d_transpose(transposed_1, num_classes, kernel_size=4, strides=(2, 2), padding='same', 
+                                        kernel_initializer=tf.truncated_normal_initializer(stddev=0.01),
+                                        kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+    
+    # 2nd skip layer
+    # 1) 1x1 conv based on vgg_layer3_out, i.e. a convolution layer even further back than vgg_layer4_out
+    vgg_layer3_out_scaled = tf.multiply(vgg_layer3_out, 0.0001, name='vgg_layer3_out_scaled')
+    conv_1x1_3 = tf.layers.conv2d(vgg_layer3_out_scaled, num_classes, kernel_size=1, strides=(1,1), padding='same', 
+                                   kernel_initializer=tf.truncated_normal_initializer(stddev=0.01),
+                                   kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+    # 2) add conv_1x1_4 and transposed_1 to form the first skip layer
+    transposed_2 = tf.add(transposed_2, conv_1x1_3)
+    
+#     final upsample with a stride of 8, 8 to get the original input size
+#     kernel size has to be bigger or else it won't work. This makes sense because at small kernels, e.g. 4x4, cannot smartly
+#     distinguish road vs non-road, so loss was consistently high at ~0.5. A bigger kernel is needed to help see the 'big picture'
+    transposed_3 = tf.layers.conv2d_transpose(transposed_2, num_classes, kernel_size=32, strides=(8, 8), padding='same', 
+                                       kernel_initializer=tf.truncated_normal_initializer(stddev=0.01),
+                                       kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3))
+    
+    return transposed_3
+    
 tests.test_layers(layers)
 
 
@@ -60,8 +110,13 @@ def optimize(nn_last_layer, correct_label, learning_rate, num_classes):
     :param num_classes: Number of classes to classify
     :return: Tuple of (logits, train_op, cross_entropy_loss)
     """
-    # TODO: Implement function
-    return None, None, None
+    logits = tf.reshape(nn_last_layer, (-1, num_classes))
+    
+    cross_entropy_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits = logits, labels = correct_label, name="cross_entropy_loss"))
+    
+    train_op = tf.train.AdamOptimizer(learning_rate).minimize(cross_entropy_loss)
+    return logits, train_op, cross_entropy_loss
+        
 tests.test_optimize(optimize)
 
 
@@ -80,8 +135,25 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_l
     :param keep_prob: TF Placeholder for dropout keep probability
     :param learning_rate: TF Placeholder for learning rate
     """
-    # TODO: Implement function
-    pass
+    sess.run(tf.global_variables_initializer())
+    lr = 2e-4
+    min_loss = 9e9
+    loss = 0
+    """saver = tf.train.Saver();"""
+    for epoch in range (epochs):
+        print ('epoch {}  learning_rate = {}'.format(epoch, lr))
+        
+        for image, label in get_batches_fn(batch_size):
+            summary, loss = sess.run([train_op, cross_entropy_loss],
+                                     feed_dict={input_image:image, correct_label:label,
+                                     keep_prob:0.5, learning_rate:lr})
+        #saver.add_summary(summary, epoch)                          
+        #lr = lr * 0.9                            
+        print(" Loss = {}".format(loss))     
+        if (loss < min_loss):
+          print("saving at step {:d}".format(epoch))     
+          min_loss = loss;
+
 tests.test_train_nn(train_nn)
 
 
@@ -93,30 +165,55 @@ def run():
     tests.test_for_kitti_dataset(data_dir)
 
     # Download pretrained vgg model
-    helper.maybe_download_pretrained_vgg(data_dir)
+    #helper.maybe_download_pretrained_vgg(data_dir)
 
     # OPTIONAL: Train and Inference on the cityscapes dataset instead of the Kitti dataset.
     # You'll need a GPU with at least 10 teraFLOPS to train on.
     #  https://www.cityscapes-dataset.com/
 
+
     with tf.Session() as sess:
+
         # Path to vgg model
         vgg_path = os.path.join(data_dir, 'vgg')
         # Create function to get batches
-        get_batches_fn = helper.gen_batch_function(os.path.join(data_dir, 'data_road/training'), image_shape)
+        path = os.path.join(data_dir, 'data_road/training')
+        print (path)
+        get_batches_fn = helper.gen_batch_function(path, image_shape)
+
+#
+        epochs = 50
+        batch_size = 32
+        
+        correct_label = tf.placeholder(tf.int32, [None, None, None, num_classes],
+                                       name = 'correct_label')
+        learning_rate = tf.placeholder(tf.float32, name='learning_rate')   
+#
 
         # OPTIONAL: Augment Images for better results
         #  https://datascience.stackexchange.com/questions/5224/how-to-prepare-augment-images-for-neural-network
 
         # TODO: Build NN using load_vgg, layers, and optimize function
+        input_image, keep_prob, layer_3, layer_4, layer_7 = load_vgg(sess, vgg_path)
+        layer_output = layers(layer_3, layer_4, layer_7, num_classes)
+        
+        logits, train_op, cross_entropy_loss = optimize(layer_output, correct_label, learning_rate, num_classes)
 
         # TODO: Train NN using the train_nn function
 
+        merged = tf.summary.merge_all()
+        writer = tf.summary.FileWriter('/tmp/log/train', sess.graph)
+        tf.global_variables_initializer().run()
+    
+        train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_loss, input_image, 
+            correct_label, keep_prob, learning_rate)
+
         # TODO: Save inference data using helper.save_inference_samples
-        #  helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, input_image)
+        helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, input_image)
 
         # OPTIONAL: Apply the trained model to a video
 
+        writer.close()
 
 if __name__ == '__main__':
     run()
