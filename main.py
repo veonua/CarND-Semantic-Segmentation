@@ -114,6 +114,10 @@ def optimize(nn_last_layer, correct_label, learning_rate, num_classes):
     
     cross_entropy_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits = logits, labels = correct_label, name="cross_entropy_loss"))
     
+    # An additional term for regularization loss must be manually incorporated as well.
+    reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+    cross_entropy_loss = cross_entropy_loss + sum(reg_losses)
+
     train_op = tf.train.AdamOptimizer(learning_rate).minimize(cross_entropy_loss)
     return logits, train_op, cross_entropy_loss
         
